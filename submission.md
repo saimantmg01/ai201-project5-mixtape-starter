@@ -1,5 +1,15 @@
 # Mixtape Bug Hunt Submission
 
+## AI Usage
+
+I used AI tools during codebase navigation and debugging, mostly to help me read unfamiliar code and organize my reasoning. I asked for summaries of `models.py` and `routes/songs.py`, traced how listening events move through routes and services, and used AI to think through a careful diagnostic approach for issue #1 before editing code.
+
+During investigation, I used AI as a second set of eyes after I had already located suspicious files. For issue #1, I verified the date logic myself by checking the concrete Saturday/Sunday values and confirming that `datetime.weekday()` returns `6` for Sunday. For issue #5, I traced the playlist route into `get_playlist_songs()` and confirmed that `songs[:-1]` was removing the final song. For issue #4, I compared the working playlist notification path with the missing rating notification path and verified the behavior with a regression test.
+
+I also used AI to help format root cause analysis entries in clear language. I verified the conclusions by running the tests myself. One useful correction during the process was issue #3: I initially planned to fix search duplicates, but the search tests passed in this local repo before any code change, so I switched to issue #4 instead of claiming a bug I could not reproduce.
+
+Regression test added: `tests/test_notifications.py`, which verifies that rating another user's song creates a notification and rating your own song does not notify yourself.
+
 ### Codebase Map
 
 `app.py` is the Flask application factory. It creates the app, configures SQLAlchemy, initializes the shared `db` object, registers the route blueprints, and creates the database tables inside the app context.
@@ -86,11 +96,9 @@ Focused reproduction command run:
 
 Result before any fix: the test fails because the streak is `1` after the Sunday listen, but the expected value is `2`.
 
-### AI Assistance and Diagnostic Approach
+### Issue #1 Diagnostic Approach
 
-AI assistance part: I used Claude to help summarize `models.py` and `routes/songs.py`, trace the feed/listening call chain, and use it to think through how to diagnose issue #1 thoroughly.
-
-To diagnose the streak reset issue thoroughly, I did:
+To diagnose the streak reset issue thoroughly, I:
 
 1. Start from the user report: a user listens on Saturday, then listens again on Sunday, and the streak should increase instead of resetting.
 2. Trace the HTTP flow from `POST /songs/<song_id>/listen` in `routes/songs.py` into `record_listening_event()` in `services/streak_service.py`.
@@ -133,7 +141,7 @@ The streak logic had an extra Sunday condition in the consecutive-day check. The
 
 Because `today.weekday()` returns `6` on Sunday, a Saturday-to-Sunday listen did not enter the increment branch. It fell into the `else` branch and reset `user.listening_streak` to `1`, even though no day was skipped.
 
-#### Fix 
+#### Your fix and side-effect check
 
 I removed the unnecessary Sunday guard so all consecutive calendar days increment the streak:
 
@@ -181,7 +189,7 @@ That slice made me confident I had found the exact cause because `songs[:-1]` me
 
 This caused every non-empty playlist response to hide exactly one song: the last song in the ordered result. Adding another song would make the previously hidden song appear, but the newly added song would become the new last item and be hidden instead.
 
-#### Fix
+#### Your fix and side-effect check
 
 I changed the return statement to serialize the full `songs` list:
 
@@ -226,7 +234,7 @@ That comparison made the specific root cause clear: the rating action had persis
 
 As a result, the rating appeared to work from the rater's perspective because the `Rating` row was saved, but the song sharer never saw anything in `GET /users/<user_id>/notifications`.
 
-#### Fix
+#### Your fix and side-effect check
 
 I added a notification after the rating is saved, but only when the rater is not the original song sharer:
 
