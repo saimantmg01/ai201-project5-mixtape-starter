@@ -65,6 +65,8 @@ I read all five issue descriptions before starting bug work:
 
 Initial plan: start with issue #1 because the user report points to a narrow streak transition, then tackle issue #3 and issue #5 because the existing tests already describe expected behavior for search and playlist ordering. Issue #4 is also a good candidate after comparing the working playlist notification path against the rating path.
 
+After attempting issue #3, the existing search tests passed before any code change, so I could not honestly reproduce that bug in this local version of the repo. Following the project instructions, I switched to issue #4 instead.
+
 ### Issue #1 Orientation Notes
 
 Relevant files for issue #1:
@@ -195,3 +197,56 @@ This fixes the root cause because no item is removed after the ordered database 
 ```
 
 The playlist tests passed, including all-songs, order, and empty-playlist behavior. The full test suite also passed, confirming the change did not break the existing streak or search tests.
+
+### Issue #4: I got notified when a friend added my song to a playlist but not when they rated it
+
+#### How I reproduced it
+
+I reproduced the bug with controlled in-memory data. I created a user who shared a song, created a second user to rate that song, called `rate_song(rater.id, song.id, 5)`, and then checked `get_notifications(sharer.id)`. Before the fix, the rating was saved with score `5`, but the sharer's notification list was empty.
+
+I also added a focused regression test and ran it before fixing the service:
+
+```bash
+.venv/bin/python -m pytest tests/test_notifications.py -q
+```
+
+Before the fix, `test_rating_friend_song_creates_notification` failed because `len(notifications)` was `0` instead of `1`. The self-rating test passed, confirming that the missing behavior was specifically about notifying another user when their shared song was rated.
+
+#### How I found the root cause
+
+I traced the rating flow from `POST /songs/<song_id>/rate` in `routes/songs.py`. The route calls `rate_song(user_id, song_id, score)` in `services/notification_service.py`. I then compared that function with the working playlist-add notification path in the same file.
+
+`add_to_playlist()` validates the song, user, and playlist, saves the playlist change, and then calls `create_notification()` when someone adds another user's shared song. `rate_song()` validated the score, song, and rater, then created or updated a `Rating`, committed it, and returned the rating. There was no call to `create_notification()` in the rating path.
+
+That comparison made the specific root cause clear: the rating action had persistence logic but was missing the notification side effect that the feature description and issue report expected.
+
+#### The root cause
+
+`rate_song()` saved ratings but never created a notification for the user who originally shared the song. The notification helper existed, and the playlist-add path already used it, but the rating path stopped immediately after `db.session.commit()`.
+
+As a result, the rating appeared to work from the rater's perspective because the `Rating` row was saved, but the song sharer never saw anything in `GET /users/<user_id>/notifications`.
+
+#### Fix
+
+I added a notification after the rating is saved, but only when the rater is not the original song sharer:
+
+```python
+if song.shared_by != user_id:
+    star_label = "star" if score == 1 else "stars"
+    create_notification(
+        user_id=song.shared_by,
+        notification_type="song_rated",
+        body=f"{rater.username} rated your song '{song.title}' {score} {star_label}.",
+    )
+```
+
+This fixes the root cause because rating another user's song now creates a `song_rated` notification for that song's sharer. I checked the side effects with a new regression test that confirms friend ratings notify the sharer and self-ratings do not notify yourself.
+
+Verification:
+
+```bash
+.venv/bin/python -m pytest tests/test_notifications.py -q
+.venv/bin/python -m pytest tests/ -q
+```
+
+The notification tests passed, and the full suite passed with 15 tests, including the existing streak, playlist, and search coverage.
