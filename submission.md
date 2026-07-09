@@ -148,3 +148,50 @@ This fixes the root cause because Sunday is now treated the same as every other 
 ```
 
 The focused Sunday test passed, and the full streak test file passed, covering new-user streaks, normal consecutive-day increments, same-day double listens, skipped-day resets, and Saturday-to-Sunday increments.
+
+### Issue #5: The last song in a playlist never shows up
+
+#### How I reproduced it
+
+I reproduced the bug with the playlist test suite:
+
+```bash
+.venv/bin/python -m pytest tests/test_playlists.py -q
+```
+
+Before the fix, two tests failed. `test_playlist_returns_all_songs` created a playlist with five songs but `get_playlist_songs()` returned only four. `test_playlist_returns_songs_in_order` expected `["Track 1", "Track 2", "Track 3", "Track 4", "Track 5"]`, but the actual result stopped at `Track 4`. The empty playlist test passed, which showed the bug was specific to non-empty playlist results.
+
+#### How I found the root cause
+
+I traced the endpoint from `GET /playlists/<playlist_id>/songs` in `routes/playlists.py`. The route calls `get_playlist_songs(playlist_id)` in `services/playlist_service.py`. That service function fetches the playlist, queries `Song` rows joined through `playlist_entries`, orders them by `playlist_entries.position`, and then serializes the result.
+
+The query itself returned songs in the correct order, so the problem was in the final return statement:
+
+```python
+return [song.to_dict() for song in songs[:-1]]
+```
+
+That slice made me confident I had found the exact cause because `songs[:-1]` means "all songs except the last one," which exactly matched the user report.
+
+#### The root cause
+
+`get_playlist_songs()` intentionally sliced off the final item before serializing the playlist songs. In Python, `songs[:-1]` returns every element up to, but not including, the last element. Because the songs were already ordered by playlist position, the removed item was always the newest/highest-position song in the playlist.
+
+This caused every non-empty playlist response to hide exactly one song: the last song in the ordered result. Adding another song would make the previously hidden song appear, but the newly added song would become the new last item and be hidden instead.
+
+#### Fix
+
+I changed the return statement to serialize the full `songs` list:
+
+```python
+return [song.to_dict() for song in songs]
+```
+
+This fixes the root cause because no item is removed after the ordered database query. I verified the playlist behavior and the full existing test suite:
+
+```bash
+.venv/bin/python -m pytest tests/test_playlists.py -q
+.venv/bin/python -m pytest tests/ -q
+```
+
+The playlist tests passed, including all-songs, order, and empty-playlist behavior. The full test suite also passed, confirming the change did not break the existing streak or search tests.
